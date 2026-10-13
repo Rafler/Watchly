@@ -1,9 +1,11 @@
 import asyncio
 import re
+import time
 from typing import Any
 
 from async_lru import alru_cache
 from deep_translator import GoogleTranslator
+from deep_translator.exceptions import TooManyRequests
 from loguru import logger
 
 # Pre-defined translations for known static catalog names.
@@ -38,6 +40,23 @@ _GOOGLE_LANG_OVERRIDES: dict[str, str] = {
     "fil": "tl",  # Filipino
     "zh": "zh-CN",  # Chinese; the regional variant is lost when the tag is split
 }
+
+# Google allows 5 requests/second from one IP and answers 429 above that. A manifest
+# translates 20-30 names concurrently, so uncached calls are spaced out (#195).
+_MIN_INTERVAL_SECONDS = 0.25
+_RETRY_AFTER_SECONDS = 1.0
+# ponytail: per-process pacing; a Redis token bucket if uvicorn ever runs with --workers > 1.
+_next_slot = 0.0
+
+
+async def _wait_for_slot() -> None:
+    # No lock needed: the read-modify-write has no await, so it is atomic on the loop.
+    global _next_slot
+    now = time.monotonic()
+    slot = max(_next_slot, now)
+    _next_slot = slot + _MIN_INTERVAL_SECONDS
+    await asyncio.sleep(slot - now)
+
 
 # Static dict inside deep-translator, no network call.
 _SUPPORTED_GOOGLE_CODES: frozenset[str] = frozenset(GoogleTranslator().get_supported_languages(as_dict=True).values())
@@ -93,19 +112,26 @@ class TranslationService:
         except Exception as e:
             # Fall back to source text on failure but don't cache the fallback —
             # otherwise a transient API blip poisons the cache for 7 days.
-            logger.exception(f"Translation failed for '{text}' to '{lang}': {e}")
+            logger.warning(f"Translation failed for '{text}' to '{lang}': {type(e).__name__}: {e}")
             return text
 
     @alru_cache(maxsize=1000, ttl=7 * 24 * 60 * 60)
     async def _translate_cached(self, text: str, lang: str) -> str:
-        loop = asyncio.get_running_loop()
-        translated = await loop.run_in_executor(
-            None, lambda: GoogleTranslator(source="auto", target=lang).translate(text)
-        )
+        try:
+            translated = await self._call_google(text, lang)
+        except TooManyRequests:
+            await asyncio.sleep(_RETRY_AFTER_SECONDS)
+            translated = await self._call_google(text, lang)
         result = translated if translated else text
         if lang == "de":
             result = _normalize_german_formality(result)
         return result
+
+    @staticmethod
+    async def _call_google(text: str, lang: str) -> str:
+        await _wait_for_slot()
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: GoogleTranslator(source="auto", target=lang).translate(text))
 
 
 translation_service = TranslationService()

@@ -1,7 +1,10 @@
 import asyncio
+import time
 
 import pytest
+from deep_translator.exceptions import TooManyRequests
 
+from app.services import translation
 from app.services.translation import TranslationService, _google_lang, translation_service
 
 
@@ -70,3 +73,44 @@ def test_google_lang_resolves_directly():
     assert _google_lang("he") == "iw"
     assert _google_lang("fr") == "fr"
     assert _google_lang("xx") is None
+
+
+def test_uncached_calls_are_spaced_under_googles_rate_limit(monkeypatch):
+    """#195: a manifest gathers 20-30 names at once; Google 429s above 5/s and every
+    name silently fell back to English."""
+    calls: list[float] = []
+
+    def record(self, text):
+        calls.append(time.monotonic())
+        return text
+
+    monkeypatch.setattr(translation.GoogleTranslator, "translate", record)
+    monkeypatch.setattr(translation, "_MIN_INTERVAL_SECONDS", 0.05)
+
+    svc = TranslationService()
+    names = [f"spacing row {i}" for i in range(6)]
+
+    async def translate_all():
+        await asyncio.gather(*(svc.translate(n, "fr") for n in names))
+
+    asyncio.run(translate_all())
+
+    assert len(calls) == 6
+    # Span, not per-gap: thread start jitter would make a per-gap bound flaky.
+    assert max(calls) - min(calls) >= 5 * 0.05 * 0.9
+
+
+def test_too_many_requests_is_retried_once(monkeypatch):
+    attempts: list[str] = []
+
+    def flaky(self, text):
+        attempts.append(text)
+        if len(attempts) == 1:
+            raise TooManyRequests()
+        return "ok"
+
+    monkeypatch.setattr(translation.GoogleTranslator, "translate", flaky)
+    monkeypatch.setattr(translation, "_RETRY_AFTER_SECONDS", 0.01)
+
+    assert asyncio.run(TranslationService().translate("retry row", "fr")) == "ok"
+    assert attempts == ["retry row", "retry row"]
