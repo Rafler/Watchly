@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.17.1 - 2026-10-13
+
+### Fixed
+
+- Catalog names in a non-English language stayed in English on a fresh instance. The manifest translated 20-30 names at once and Google Translate rejects more than 5 requests a second, so most names fell back to the source text. Requests are now spaced out and a rejected one is retried once (#195).
+
 ## 1.17.0 - 2026-10-03
 
 ### Added
