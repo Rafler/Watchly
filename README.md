@@ -143,7 +143,7 @@ Docker is the recommended way to self-host. Watchly requires a **Redis** instanc
 
    # Optional — enable Trakt / Simkl (see "Optional integrations")
    # TRAKT_CLIENT_ID=
-   # TRAKT_CLIENT_SECRET=
+   # TRAKT_CLIENT_SECRET=   # only for legacy (non-PKCE) Trakt apps
    # SIMKL_CLIENT_ID=
    # SIMKL_CLIENT_SECRET=
    ```
@@ -255,7 +255,7 @@ All settings are environment variables. Only `TOKEN_SALT` and `HOST_NAME` are st
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TRAKT_CLIENT_ID` / `TRAKT_CLIENT_SECRET` | — | Trakt OAuth app credentials; enable Trakt as a history source. |
+| `TRAKT_CLIENT_ID` / `TRAKT_CLIENT_SECRET` | — | Trakt OAuth app credentials; enable Trakt as a history source. The secret is only needed for legacy apps — PKCE apps (the Trakt default now) have none. |
 | `SIMKL_CLIENT_ID` / `SIMKL_CLIENT_SECRET` | — | Simkl OAuth app credentials; enable Simkl as a history source. |
 
 ### Tuning & behavior
@@ -280,7 +280,7 @@ All settings are environment variables. Only `TOKEN_SALT` and `HOST_NAME` are st
 
 These are only needed if you want the corresponding feature; Watchly runs fine with just TMDB + Redis.
 
-- **Trakt** — create an API app at [trakt.tv/oauth/applications](https://trakt.tv/oauth/applications). Set the redirect URI to `HOST_NAME/auth/trakt/callback` and put the client ID/secret in `TRAKT_CLIENT_ID` / `TRAKT_CLIENT_SECRET`.
+- **Trakt** — create an API app at [trakt.tv/oauth/applications](https://trakt.tv/oauth/applications). Set the redirect URI to `HOST_NAME/auth/trakt/callback` and put the client ID in `TRAKT_CLIENT_ID`. New Trakt apps use PKCE and are not issued a secret; set `TRAKT_CLIENT_SECRET` only if your app has one.
 - **Simkl** — create an app at [simkl.com/settings/developer](https://simkl.com/settings/developer). Set the redirect URI to `HOST_NAME/auth/simkl/callback` and put the credentials in `SIMKL_CLIENT_ID` / `SIMKL_CLIENT_SECRET`.
 - **AI-named rows** — users configure an LLM provider (Gemini, OpenAI, Anthropic, or OpenRouter) with their own API key on the configure page; no server config required. Without one, rows fall back to deterministic names.
 - **Poster ratings (RPDB)** — users enter their own [RatingPosterDB](https://ratingposterdb.com/) key on the configure page; no server config required.
