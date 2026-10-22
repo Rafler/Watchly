@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import secrets
 import time
 from urllib.parse import urlencode
@@ -40,6 +42,11 @@ def _verify_state(request: Request, provider: str, state: str | None) -> None:
 TRAKT_AUTH_URL = "https://trakt.tv/oauth/authorize"
 
 
+def _pkce_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode()).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
 @router.get("/auth/trakt")
 async def trakt_auth_redirect(request: Request):
     """Redirect user to Trakt authorization page."""
@@ -48,31 +55,41 @@ async def trakt_auth_redirect(request: Request):
 
     redirect_uri = f"{settings.HOST_NAME}/auth/trakt/callback"
     state = secrets.token_urlsafe(32)
+    verifier = secrets.token_urlsafe(64)
     params = urlencode(
         {
             "response_type": "code",
             "client_id": settings.TRAKT_CLIENT_ID,
             "redirect_uri": redirect_uri,
             "state": state,
+            # Trakt now creates apps in PKCE mode without a client secret and
+            # rejects an authorize request with no code_challenge. Legacy apps
+            # with a secret accept the challenge too, so it is always sent.
+            "code_challenge": _pkce_challenge(verifier),
+            "code_challenge_method": "S256",
         }
     )
     response = RedirectResponse(f"{TRAKT_AUTH_URL}?{params}")
     _set_state_cookie(response, "trakt", state)
+    _set_state_cookie(response, "trakt_verifier", verifier)
     return response
 
 
 @router.get("/auth/trakt/callback", response_class=HTMLResponse)
 async def trakt_callback(request: Request, code: str, state: str | None = None):
     """Handle Trakt OAuth callback, exchange code for tokens."""
-    if not settings.TRAKT_CLIENT_ID or not settings.TRAKT_CLIENT_SECRET:
+    if not settings.TRAKT_CLIENT_ID:
         raise HTTPException(status_code=501, detail="Trakt integration is not configured on this server.")
 
     _verify_state(request, "trakt", state)
+    verifier = request.cookies.get(f"{_OAUTH_STATE_COOKIE_PREFIX}trakt_verifier")
+    if not verifier:
+        raise HTTPException(status_code=400, detail="Invalid or missing OAuth state. Please try connecting again.")
 
     redirect_uri = f"{settings.HOST_NAME}/auth/trakt/callback"
 
     try:
-        token_data = await trakt_service.exchange_code(code, redirect_uri)
+        token_data = await trakt_service.exchange_code(code, redirect_uri, verifier)
         access_token = token_data.get("access_token", "")
         refresh_token = token_data.get("refresh_token", "")
         # Trakt returns expires_in (seconds, ~3 months) and created_at (epoch).

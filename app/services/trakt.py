@@ -37,16 +37,24 @@ class TraktService:
         """GET /users/me - validate token and get username."""
         return await self.client.get("/users/me", headers=self._headers(access_token))
 
-    async def exchange_code(self, code: str, redirect_uri: str) -> dict[str, Any]:
+    @staticmethod
+    def _client_credentials() -> dict[str, str]:
+        # PKCE-mode Trakt apps are issued no secret; client_secret is optional on /oauth/token.
+        creds = {"client_id": settings.TRAKT_CLIENT_ID or ""}
+        if settings.TRAKT_CLIENT_SECRET:
+            creds["client_secret"] = settings.TRAKT_CLIENT_SECRET
+        return creds
+
+    async def exchange_code(self, code: str, redirect_uri: str, code_verifier: str) -> dict[str, Any]:
         """Exchange authorization code for tokens."""
         return await self.client.post(
             "/oauth/token",
             json={
                 "code": code,
-                "client_id": settings.TRAKT_CLIENT_ID,
-                "client_secret": settings.TRAKT_CLIENT_SECRET,
+                "code_verifier": code_verifier,
                 "redirect_uri": redirect_uri,
                 "grant_type": "authorization_code",
+                **self._client_credentials(),
             },
         )
 
@@ -56,10 +64,9 @@ class TraktService:
             "/oauth/token",
             json={
                 "refresh_token": refresh_token,
-                "client_id": settings.TRAKT_CLIENT_ID,
-                "client_secret": settings.TRAKT_CLIENT_SECRET,
                 "redirect_uri": redirect_uri,
                 "grant_type": "refresh_token",
+                **self._client_credentials(),
             },
         )
 

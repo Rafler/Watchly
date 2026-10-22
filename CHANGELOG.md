@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.17.2 - 2026-10-22
+
+### Fixed
+
+- Connecting a Trakt app created in PKCE mode failed with `code_challenge is required for this client`. The authorize request now carries a PKCE challenge and the token exchange its verifier, and `TRAKT_CLIENT_SECRET` is optional: PKCE apps are issued none, legacy apps still send theirs (#199).
+
 ## 1.17.1 - 2026-10-13
 
 ### Fixed
