@@ -50,7 +50,8 @@ logs/
 migration.py
 
 
-.cursor
+.cursor/*
+!.cursor/skills/
 .github
 .pytest_cache
 .ruff_cache

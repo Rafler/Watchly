@@ -1,5 +1,5 @@
 default_stages: [pre-commit]
-exclude: '^misc/|^data/|^docs/'
+exclude: '^misc/|^data/|^docs/|^\.cursor/skills/'
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
