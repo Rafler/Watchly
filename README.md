@@ -1,5 +1,7 @@
 # Watchly
 
+Fork of [TimilsinaBimal/Watchly](https://github.com/TimilsinaBimal/Watchly) (MIT). The upstream license and copyright in [LICENSE](LICENSE) are unchanged.
+
 <div align="center">
 
 <!-- Premium Badge Collection -->
