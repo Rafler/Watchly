@@ -26,7 +26,7 @@
                 <span class="badge border border-accent/30 bg-accent/10 text-accent-soft">One click</span>
                 <h3 class="card-title mt-3">Vercel</h3>
                 <p class="card-desc">No server to run: deploy from the button and add a Redis Cloud database in the same
-                    flow. Background refreshes are best effort.</p>
+                    flow. The daily refresh is the cron in vercel.json.</p>
             </a>
             <a href="#docker" class="card block transition hover:border-accent/40">
                 <span class="badge border border-white/10 bg-white/5 text-neutral-200">Recommended</span>
@@ -71,19 +71,19 @@
 
         <div class="rounded-xl border border-amber-400/25 bg-amber-400/10 p-4 text-sm leading-relaxed text-amber-200">
             <h3 class="font-semibold text-amber-100">Limits on Vercel</h3>
-            <p class="mt-1">Watchly does some work after it has already answered a request, and Vercel's Python runtime
-                has no way to keep a function alive for that. That work may be paused or cut short:</p>
+            <p class="mt-1">Vercel does not keep a process between requests, so the in-process daily resync does not
+                start here. <code class="{{ code }}">vercel.json</code> calls
+                <code class="{{ code }}">GET /cron/resync</code> every day at 06:00 UTC. Set
+                <code class="{{ code }}">CRON_SECRET</code>; Vercel sends it as
+                <code class="{{ code }}">Authorization: Bearer</code>. Without it the endpoint returns 503.</p>
             <ul class="mt-2 list-disc space-y-1 pl-5">
                 <li>Setup may stop at "Setup is taking a while". Your URL still works; the first home screen builds
-                    its rows as Stremio asks for them, so it is slower.</li>
-                <li>Stale rows are served as they are while a rebuild runs in the background. If that rebuild is cut,
-                    the next request tries again.</li>
-                <li>There is no scheduler. Catalogs refresh only when Stremio requests them, and that refresh is not
-                    guaranteed to finish.</li>
-                <li>A single request can run for up to 5 minutes by default. A very large library can take longer on
-                    its first build.</li>
+                    its rows as Stremio asks for them, with the scored order and no model call.</li>
+                <li>A catalog request serves the cache. It does not rebuild the row and it does not call OpenRouter.</li>
+                <li>The cron runs inside the function time limit (5 minutes by default). One library fits. A run that
+                    is killed leaves its lock for up to 2 hours and finishes on the next cron.</li>
+                <li>Docker runs the same rebuild in the process and does not depend on that limit.</li>
             </ul>
-            <p class="mt-2">If you want refreshes to run reliably, use Docker.</p>
         </div>
     </section>
 
@@ -243,6 +243,20 @@
                             <code class="{{ code }}">rediss://</code> connection string. See
                             <a href="#redis" class="text-accent-soft underline underline-offset-2 hover:text-white">Choose
                                 a Redis</a>.</td>
+                    </tr>
+                    <tr>
+                        <td class="py-3 pr-4 align-top"><code class="{{ code }}">OPENROUTER_API_KEY</code>
+                            <span class="badge mt-1 block w-fit border border-white/10 bg-white/5 text-neutral-200">Optional</span></td>
+                        <td class="py-3">With <code class="{{ code }}">OPENROUTER_MODEL</code>, the daily resync orders
+                            and names Top Picks, Because you watched, and theme rows. Leave both unset to keep the
+                            built-in scores. A catalog request never calls the model.</td>
+                    </tr>
+                    <tr>
+                        <td class="py-3 pr-4 align-top"><code class="{{ code }}">CRON_SECRET</code>
+                            <span class="badge mt-1 block w-fit border border-white/10 bg-white/5 text-neutral-200">Vercel</span></td>
+                        <td class="py-3">Bearer secret for <code class="{{ code }}">/cron/resync</code>. Required on
+                            Vercel so the daily cron can rebuild rows. Generate one the same way as
+                            <code class="{{ code }}">TOKEN_SALT</code>.</td>
                     </tr>
                 </tbody>
             </table>

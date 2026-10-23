@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.security import redact_token
 from app.services.auth import auth_service
 from app.services.context import extract_settings
+from app.services.ranking import model_ranking
 from app.services.stremio.service import StremioBundle
 from app.services.token_store import token_store
 
@@ -71,7 +72,17 @@ class CatalogUpdater:
     async def refresh_catalogs_for_credentials(
         self, token: str, credentials: dict[str, Any], update_timestamp: bool = True
     ) -> bool:
-        """Build a fresh manifest and push the catalogs to Stremio."""
+        """Build a fresh manifest and push the catalogs to Stremio.
+
+        Model ranking is on for this call only. Catalog requests never enter it,
+        so a Stremio poll cannot block on OpenRouter.
+        """
+        with model_ranking():
+            return await self._refresh_catalogs_for_credentials(token, credentials, update_timestamp)
+
+    async def _refresh_catalogs_for_credentials(
+        self, token: str, credentials: dict[str, Any], update_timestamp: bool = True
+    ) -> bool:
         if not credentials:
             logger.warning(f"[{redact_token(token)}] Attempted to refresh catalogs with no credentials.")
             raise HTTPException(
@@ -142,10 +153,11 @@ class CatalogUpdater:
                     logger.warning(f"[{redact_token(token)}] Failed to update timestamp: {e}")
 
             if success:
-                # Rewriting the library and profiles drops every cached row. Build them
-                # now so the next home screen doesn't wait on each one. Imported here
-                # because the catalog service imports this module to trigger refreshes.
+                # A cached row is served as-is. Only a Stremio library rewrite drops
+                # those rows on its own, so clear each slot before rebuilding it.
+                # Imported here to keep this module off the catalog request path.
                 from app.services.recommendation.catalog_service import catalog_service
+                from app.services.user_cache import user_cache
 
                 for catalog in catalogs:
                     # Stremio's home board skips a row with a required extra; that one is
@@ -153,6 +165,7 @@ class CatalogUpdater:
                     if any(extra.get("isRequired") for extra in catalog.get("extra", [])):
                         continue
                     try:
+                        await user_cache.invalidate_catalog(token, catalog["type"], catalog["id"])
                         await catalog_service.get_catalog(token, catalog["type"], catalog["id"])
                     except Exception as e:
                         # A row that fails to build comes back empty, so what gets here is

@@ -1,5 +1,3 @@
-from typing import Literal
-
 from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
@@ -12,8 +10,7 @@ from app.api.models.validation import (
     PosterRatingValidationInput,
 )
 from app.core.security import STORED_SECRET_SENTINEL
-from app.core.settings import LLMConfig, PosterRatingConfig
-from app.services.llm import llm_service
+from app.core.settings import PosterRatingConfig
 from app.services.mdblist import mdblist_service
 from app.services.poster_ratings.factory import PosterProvider, poster_ratings_factory
 from app.services.simkl import simkl_service
@@ -22,22 +19,6 @@ from app.services.token_store import token_store
 from app.services.trakt import trakt_service
 
 router = APIRouter(tags=["Validation"])
-
-
-class LLMValidationInput(BaseModel):
-    provider: Literal["gemini", "openai", "anthropic", "openrouter"]
-    api_key: str = Field(description="API key for the provider")
-    model: str | None = Field(default=None, description="Optional model id override")
-
-
-@router.post("/llm/validation")
-async def validate_llm_key(data: LLMValidationInput) -> BaseValidationResponse:
-    """Validate the key (and model) with a minimal real generation."""
-    config = LLMConfig(provider=data.provider, api_key=data.api_key.strip(), model=(data.model or "").strip() or None)
-    title = await llm_service.generate_title("Genre: Action, Keyword: heist", config)
-    if title:
-        return BaseValidationResponse(valid=True, message=f"Key works with {config.resolved_model()}")
-    return BaseValidationResponse(valid=False, message="Could not generate with this key/model")
 
 
 @router.post("/tmdb/validation")

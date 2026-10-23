@@ -568,26 +568,6 @@ async function fetchIdentity(payload) {
                 hint: hints.simkl_api_key,
             });
 
-            // LLM config; legacy gemini_api_key maps onto the gemini provider
-            const llmProviderSelect = document.getElementById('llmProvider');
-            const llmApiKeyInput = document.getElementById('llmApiKey');
-            const llmModelInput = document.getElementById('llmModel');
-            const llm = (s.llm && s.llm.api_key)
-                ? s.llm
-                : (s.gemini_api_key ? { provider: 'gemini', api_key: s.gemini_api_key, model: null } : null);
-            if (llm && llmProviderSelect && llmApiKeyInput) {
-                llmProviderSelect.value = llm.provider;
-                if (llmModelInput) llmModelInput.value = llm.model || '';
-                // Trigger change event to show the key/model fields
-                llmProviderSelect.dispatchEvent(new Event('change'));
-                // After the change handler, which resets placeholders on this field.
-                setSecretField(llmApiKeyInput, llm.api_key, {
-                    toggleId: 'llmApiKeyToggle',
-                    hintId: 'llmValidationMessage',
-                    hint: hints['llm.api_key'] || hints.gemini_api_key,
-                });
-            }
-
             // Watch History Source + OAuth tokens
             restoreWatchHistoryState(s);
 

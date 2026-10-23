@@ -12,7 +12,8 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from loguru import logger
 
 from app.core.config import settings
-from app.core.security import _SECRET_NESTED_FIELDS, _SECRET_SETTINGS_FIELDS, redact_token
+from app.core.constants import ACCOUNT_INDEX_KEY
+from app.core.security import _SECRET_NESTED_FIELDS, _SECRET_SETTINGS_FIELDS, TOKEN_PATTERN, redact_token
 from app.services.redis_service import redis_service
 from app.services.user_cache import user_cache
 
@@ -171,6 +172,7 @@ class TokenStore:
             except Exception as e_clear:
                 logger.error(f"Error while clearing cache: {e_clear}")
 
+        await self.remember_account(token)
         return token
 
     async def update_user_data(self, token: str, payload: dict[str, Any]) -> str:
@@ -308,6 +310,7 @@ class TokenStore:
         await redis_service.delete(key)
         # we also need to delete the cached library items, profiles and watched sets
         if token:
+            await self.forget_account(token)
             try:
                 await user_cache.invalidate_all_user_data(token)
             except Exception as e:
@@ -324,6 +327,44 @@ class TokenStore:
             pass
         except Exception as e:
             logger.warning(f"Failed to invalidate user data cache during token deletion: {e}")
+
+    async def remember_account(self, token: str) -> None:
+        await redis_service.sadd(ACCOUNT_INDEX_KEY, token)
+
+    async def forget_account(self, token: str) -> None:
+        await redis_service.srem(ACCOUNT_INDEX_KEY, token)
+
+    async def list_account_tokens(self) -> list[str]:
+        members = await redis_service.smembers(ACCOUNT_INDEX_KEY)
+        if members:
+            return sorted(members)
+        # Accounts saved before the index existed live only under the token prefix.
+        # The daily resync is the only caller; catalog requests do not scan.
+        return sorted(await self._backfill_account_index())
+
+    async def _backfill_account_index(self) -> set[str]:
+        try:
+            client = await redis_service.get_client()
+        except (redis.RedisError, OSError) as exc:
+            logger.warning(f"Cannot list accounts; Redis unavailable: {exc}")
+            return set()
+
+        prefix = self.KEY_PREFIX
+        found: set[str] = set()
+        try:
+            async for key in client.scan_iter(match=f"{prefix}*", count=500):
+                if not isinstance(key, str) or not key.startswith(prefix):
+                    continue
+                token = key[len(prefix) :]
+                if TOKEN_PATTERN.match(token):
+                    found.add(token)
+        except (redis.RedisError, OSError) as exc:
+            logger.warning(f"Account index backfill failed: {exc}")
+            return set()
+
+        for token in found:
+            await redis_service.sadd(ACCOUNT_INDEX_KEY, token)
+        return found
 
     async def count_users(self) -> int:
         """Count total users by scanning Redis keys with the configured prefix.

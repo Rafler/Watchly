@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     SIMKL_CLIENT_ID: str | None = None
     SIMKL_CLIENT_SECRET: str | None = None
 
+    # One server key. Row ranking and naming run on the daily resync, not on catalog requests.
+    OPENROUTER_API_KEY: str | None = None
+    OPENROUTER_MODEL: str | None = None
+    CRON_SECRET: str | None = None
+
 
 settings = Settings()
 

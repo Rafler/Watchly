@@ -21,3 +21,19 @@ jobs:
           python-version: '3.11'
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.0
+  tests:
+    runs-on: ubuntu-latest
+    env:
+      # Constructor guard only. Tests mock HTTP and never call TMDB.
+      TMDB_API_KEY: test
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - name: Install uv
+        run: pip install uv
+      - name: Run tests
+        run: uv run --with pytest python -m pytest tests/ -q

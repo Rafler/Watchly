@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Daily catalog resync. A long-running process rebuilds every account on `CATALOG_REFRESH_INTERVAL_SECONDS` (default 24 hours). Vercel and system cron call `GET` or `POST /cron/resync` with `Authorization: Bearer $CRON_SECRET`. `python -m app.services.resync` does the same once.
+
+### Changed
+
+- Top Picks, "Because you watched", and theme rows are ordered and named by one OpenRouter model (`OPENROUTER_API_KEY`, `OPENROUTER_MODEL`) during that resync. The model may only return ids it was given. A timeout, error, or invalid response keeps the existing scores and title. Catalog requests serve the cache and do not call the model.
+- Per-user Gemini, OpenAI, Anthropic, and OpenRouter keys are removed from the configure page. Stored copies of those fields are ignored on the next read.
+
 ## 1.17.2 - 2026-10-22
 
 ### Fixed

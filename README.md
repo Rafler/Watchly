@@ -14,7 +14,7 @@ Fork of [TimilsinaBimal/Watchly](https://github.com/TimilsinaBimal/Watchly) (MIT
 
 **Watchly** is a Stremio catalog addon that fills your Stremio home with personalized movie and series recommendations built from your own watch history. It reads what you've watched, rated, and loved — from **Stremio, Trakt, Simkl, MDBList, or Nuvio** — builds a numerical taste profile from it, and serves a set of recommendation rows ("Top Picks for You", "Because you watched …", genre and keyword catalogs, and more) using metadata from [TMDB](https://www.themoviedb.org/).
 
-Everything is configured through a web page; you paste the resulting manifest URL into Stremio once, and the catalogs keep refreshing in the background.
+Everything is configured through a web page; you paste the resulting manifest URL into Stremio once. A daily resync rebuilds the rows. When `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` are set, that resync asks the model to order and name Top Picks, "Because you watched", and theme rows. Catalog requests serve the cache and do not call the model.
 
 ## Table of contents
 
@@ -29,6 +29,8 @@ Everything is configured through a web page; you paste the resulting manifest UR
 - [Choose a Redis](#choose-a-redis)
 - [Deploy on Vercel](#deploy-on-vercel)
 - [Configuration reference](#configuration-reference)
+- [OpenRouter](#openrouter)
+- [Daily resync](#daily-resync)
 - [Optional integrations](#optional-integrations)
 - [Development](#development)
 - [Architecture](#architecture)
@@ -43,9 +45,9 @@ Everything is configured through a web page; you paste the resulting manifest UR
 - **Multiple catalog types** — Top Picks, "Because you watched/loved", dynamic genre & keyword rows, recommendations from your recurring directors and actors, and "based on everything you loved/liked".
 - **Fine-grained personalization** — discovery style (mainstream → hidden gems), release-year window, excluded genres (separately for movies and series), display language, and per-catalog enable/rename/shuffle controls.
 - **Poster ratings overlay** — optionally overlay IMDb/TMDb-style ratings on posters via [RatingPosterDB](https://ratingposterdb.com/), Top Posters, or a custom template.
-- **Bring your own keys** — supply your own TMDB, Simkl, or Gemini API keys, or rely on the server's.
+- **Bring your own keys** — supply your own TMDB or Simkl API key, or rely on the server's.
 - **Secure by design** — credentials are encrypted at rest in Redis and never appear in the manifest URL, which carries only a short opaque token.
-- **Background sync** — catalogs are refreshed on a schedule so your home page is ready before you open it.
+- **Daily resync** — a long-running process rebuilds catalogs on a schedule. On Vercel, a cron calls a protected endpoint. Either way the home page reads the cache.
 - **Fast** — aggressive Redis caching of profiles, libraries, and rendered catalogs keeps responses quick.
 
 ## How it works
@@ -53,7 +55,8 @@ Everything is configured through a web page; you paste the resulting manifest UR
 1. You open the `/configure` page and connect a history source (Stremio login, Trakt/Simkl via OAuth, or an MDBList API key). Your credentials are encrypted and stored in Redis under a short opaque **token**. That token is embedded in your personal manifest URL.
 2. Watchly fetches your watch history from the configured source and converts it into a source-agnostic library — ratings ≥ 9 count as *loved*, 7–8.9 as *liked*, the rest as *watched*.
 3. From that library it builds a **taste profile**: a numerical fingerprint of your preferences across genres, keywords, people, eras, countries, and runtime.
-4. When Stremio requests a catalog, Watchly routes the request to the matching recommendation engine, pulls candidates from TMDB (and Simkl where available), scores them against your profile, caps them for diversity, enriches them with metadata and (optionally) poster ratings, translates titles to your language, and returns a standard Stremio catalog.
+4. The daily resync runs the recommendation engines: candidates come from TMDB (and Simkl where available), are scored against your profile, capped for diversity, and enriched with metadata. If OpenRouter is configured, the model then reorders Top Picks, "Because you watched", and theme rows and may rename them. Anything else — a timeout, invalid JSON, an id the model invented — keeps the scored order and the existing title. The result is cached.
+5. When Stremio requests a catalog, Watchly returns that cache. A cold cache (nothing stored yet) is built with the scored order on that request and does not call the model.
 
 Each user's state is keyed entirely on their token. You can switch history sources at any time; the library and profile are rebuilt from the new source.
 
@@ -143,6 +146,10 @@ Docker is the recommended way to self-host. Watchly requires a **Redis** instanc
    # Redis (matches the compose service name)
    REDIS_URL=redis://redis:6379/0
 
+   # Optional — rank and name rows on the daily resync (see "OpenRouter")
+   # OPENROUTER_API_KEY=
+   # OPENROUTER_MODEL=typesafe/jev-1.14
+
    # Optional — enable Trakt / Simkl (see "Optional integrations")
    # TRAKT_CLIENT_ID=
    # TRAKT_CLIENT_SECRET=   # only for legacy (non-PKCE) Trakt apps
@@ -223,14 +230,12 @@ Vercel detects the FastAPI app with no extra config and runs it on Python 3.12, 
 
 Leave `APP_ENV` unset: the `production` default refuses to start with the placeholder `TOKEN_SALT`.
 
-**Limits.** Watchly finishes some work after it has answered a request, and Vercel's Python runtime has no way to keep the function alive for it, so that work may be paused or cut short:
+**Limits.** Vercel does not keep a process alive between requests, so the in-process resync loop does not start there (`VERCEL` is set, or `APP_ENV=vercel`). [`vercel.json`](vercel.json) schedules `GET /cron/resync` every day at 06:00 UTC. Set `CRON_SECRET`; Vercel sends it as `Authorization: Bearer <CRON_SECRET>`. Without that variable the endpoint returns 503.
 
-- The setup warm-up may not finish. The configure page falls back to "Setup is taking a while", and the first home screen builds its rows as Stremio requests them, so it is slower.
-- A stale row is served while it rebuilds in the background; if the rebuild is cut, the next request tries again.
-- There is no scheduler: catalogs refresh only when Stremio requests them, and that refresh is not guaranteed to complete.
-- A request can run for 5 minutes by default, so a very large library may time out on its first build.
-
-If you want background refreshes to run reliably, use Docker.
+- The setup warm-up may not finish. The configure page falls back to "Setup is taking a while", and the first home screen builds its rows as Stremio requests them, with the scored order and no model call.
+- A catalog request never rebuilds a cached row and never calls OpenRouter. Until the cron has run once, a cold row is the scored list.
+- The cron runs inside a function with the platform's request limit (5 minutes by default). One personal library fits. A resync that is killed leaves the Redis lock until it expires (2 hours) and finishes on the next run.
+- Docker runs the same rebuild in-process and does not depend on that limit.
 
 ## Configuration reference
 
@@ -269,8 +274,8 @@ All settings are environment variables. Only `TOKEN_SALT` and `HOST_NAME` are st
 | `ADDON_NAME` | `Watchly` | Display name in the manifest. |
 | `APP_ENV` | `production` | `development`, `production`, or `vercel`. |
 | `TOKEN_TTL_SECONDS` | `0` | Token expiry in seconds; `0` = never expire. |
-| `AUTO_UPDATE_CATALOGS` | `true` | Refresh dynamic catalogs in the background on a schedule. |
-| `CATALOG_REFRESH_INTERVAL_SECONDS` | `86400` | Background refresh interval (24 h). |
+| `AUTO_UPDATE_CATALOGS` | `true` | Run the in-process daily resync on a long-running server. Has no effect on Vercel. |
+| `CATALOG_REFRESH_INTERVAL_SECONDS` | `86400` | How often that loop rebuilds every account (24 h). |
 | `CATALOG_CACHE_TTL` | `60` | `Cache-Control` max-age, in seconds, that Stremio may reuse a catalog response for. |
 | `CATALOG_STALE_TTL` | `604800` | Soft-expiration fallback for cached catalogs (7 d). |
 | `RECOMMENDATION_SOURCE_ITEMS_LIMIT` | `10` | Number of library items used to seed recommendations. |
@@ -278,14 +283,54 @@ All settings are environment variables. Only `TOKEN_SALT` and `HOST_NAME` are st
 | `ANNOUNCEMENT_HTML` | `""` | Optional HTML banner shown on the configure page. |
 | `ALLOW_SIGNUPS` | `true` | Set to `false` to lock the instance to existing accounts; new signups are rejected. |
 
+### OpenRouter and cron
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | — | Server key for [OpenRouter](https://openrouter.ai/). Never put it in the configure page or a URL. |
+| `OPENROUTER_MODEL` | — | Model id, for example `typesafe/jev-1.14` or `openai/gpt-4o-mini`. Both this and the key must be set or rows stay on the built-in scores. |
+| `CRON_SECRET` | — | Bearer secret for `GET` and `POST /cron/resync`. Unset, the endpoint returns 503. |
+
+## OpenRouter
+
+One key and one model id, both read from the environment. The configure page does not collect a model key.
+
+The resync still builds candidates with Watchly's engines. The model only reorders and names three families: Top Picks (`watchly.rec`), "Because you watched / loved" (`watchly.item`), and theme rows (`watchly.theme`). Creators, loved, liked, and rewatch rows stay on the scored order. A returned id that was not in the candidate list is dropped. If the call times out, errors, or comes back as something other than the expected JSON, that row keeps the scored order and its existing title, and that result is what gets cached.
+
+**Picking a model.** Any id from the [models list](https://openrouter.ai/models) works. Decision models such as `typesafe/jev-1.14` are not on the default list: `GET /api/v1/models` omits them. They show up for `output_modalities=decisions` and for `output_modalities=all`. `typesafe/jev-router` is a text model, not a decision model. Pin a versioned id (`typesafe/jev-1.14`). An alias such as `~typesafe/jev-latest` can move to another build.
+
+Watchly reads `output_modalities` with `output_modalities=all` and sends a decision-only model to `POST /api/alpha/decisions`. Those models do not write titles. The row name is a choice among titles the server already built (the current name, a shorter theme name, "More like {seed}", or none). A chat model uses `POST /api/v1/chat/completions` with a JSON schema. If the models list cannot be loaded, the id is sent to chat completions; a decision model fails that call and the row falls back to scores.
+
+**Cost.** A resync makes about two calls per enabled Top Picks, Because-you-watched, and theme row, per movies and series, per account: one to name the row and one to order it. Opening Stremio does not call the model. Decision calls report `usage.cost` in USD on the Decisions API; chat models bill as normal completions. The price is whatever `OPENROUTER_MODEL` costs that day — check the model page. Leave both variables unset and nothing is billed.
+
+## Daily resync
+
+Catalog rows are rebuilt on a schedule, then served from Redis until the next rebuild.
+
+- **Docker or any long-running process.** On startup, if `AUTO_UPDATE_CATALOGS` is true and the process is not on Vercel, a loop rebuilds every account. It waits 30 seconds after boot, then repeats every `CATALOG_REFRESH_INTERVAL_SECONDS` (default 24 hours). A Redis lock (`watchly:resync:lock`, 2 hours) keeps two loops from overlapping.
+- **Vercel Cron or system cron.** `GET` or `POST /cron/resync` with `Authorization: Bearer <CRON_SECRET>` runs the same rebuild. [`vercel.json`](vercel.json) schedules it daily at 06:00 UTC. Vercel sends the `CRON_SECRET` env var as that bearer token. A system cron is the same request:
+
+  ```bash
+  curl -fsS -H "Authorization: Bearer $CRON_SECRET" https://your-public-addon-url/cron/resync
+  ```
+
+- **One-shot.** From a checkout with the same environment and a reachable Redis:
+
+  ```bash
+  uv run python -m app.services.resync
+  ```
+
+  It prints `{"status": "ok", "refreshed": N, "failed": M}` or `{"status": "busy", ...}` when a resync is already running.
+
+Accounts are listed from a Redis set written when an account is saved. The first resync on an install from before that set scans stored tokens once and fills the set. Catalog requests do not scan.
+
 ## Optional integrations
 
 These are only needed if you want the corresponding feature; Watchly runs fine with just TMDB + Redis.
 
 - **Trakt** — create an API app at [trakt.tv/oauth/applications](https://trakt.tv/oauth/applications). Set the redirect URI to `HOST_NAME/auth/trakt/callback` and put the client ID in `TRAKT_CLIENT_ID`. New Trakt apps use PKCE and are not issued a secret; set `TRAKT_CLIENT_SECRET` only if your app has one.
 - **Simkl** — create an app at [simkl.com/settings/developer](https://simkl.com/settings/developer). Set the redirect URI to `HOST_NAME/auth/simkl/callback` and put the credentials in `SIMKL_CLIENT_ID` / `SIMKL_CLIENT_SECRET`.
-- **AI-named rows** — users configure an LLM provider (Gemini, OpenAI, Anthropic, or OpenRouter) with their own API key on the configure page; no server config required. Without one, rows fall back to deterministic names.
-- **Poster ratings (RPDB)** — users enter their own [RatingPosterDB](https://ratingposterdb.com/) key on the configure page; no server config required.
+- **Poster ratings (RPDB)** — users enter their own [RatingPosterDB](https://ratingposterdb.com/) key on the configure page; no server config required. Row naming is the server OpenRouter model, described above.
 
 ## Development
 
@@ -305,7 +350,7 @@ uv run main.py --dev
 uvicorn app.core.app:app --reload
 ```
 
-Create a `.env` with at least `TMDB_API_KEY`, `TOKEN_SALT`, `HOST_NAME`, and `REDIS_URL` before running. The configure UI is served at `/configure`.
+Create a `.env` with at least `TOKEN_SALT`, `HOST_NAME`, and `REDIS_URL` before running. `TMDB_API_KEY` is optional but recommended. Add `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` when you want the daily resync to rank rows. The configure UI is served at `/configure`.
 
 ### Tests, linting, formatting
 
@@ -344,7 +389,7 @@ app/
     poster_ratings/ # RPDB / Top Posters / custom overlays
     stremio/      # Stremio library + auth
     tmdb/         # TMDB client, genres, countries
-    …             # trakt, simkl, gemini, translation, caching, catalog updater
+    …             # trakt, simkl, openrouter, ranking, resync, translation, caching, catalog updater
   static/, templates/  # the configure UI and dashboard
 ```
 
@@ -359,6 +404,7 @@ app/
 | `GET /auth/trakt`, `GET /auth/simkl` | OAuth start; `/callback` variants complete the flow. |
 | `GET /{token}/dashboard/data` | User dashboard data. |
 | `GET /health`, `GET /stats` | Readiness probe and usage stats. |
+| `GET` or `POST /cron/resync` | Rebuild every account. Requires `Authorization: Bearer <CRON_SECRET>`. |
 
 ## Contributing
 

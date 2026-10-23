@@ -12,11 +12,10 @@ import random
 from typing import Any
 
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from app.core.settings import LLMConfig
 from app.models.profile import TasteProfile
-from app.services.llm import llm_service
+from app.services.ranking import name_row, taste_line
 from app.services.tmdb.countries import COUNTRY_ADJECTIVES
 from app.services.tmdb.genre import movie_genres, series_genres
 from app.services.tmdb.service import TMDBService, get_tmdb_service
@@ -41,15 +40,6 @@ class RowDefinition(BaseModel):
 
     title: str
     id: str
-
-
-class LLMRowTheme(BaseModel):
-    """Schema for LLM structured output — a single themed catalog row."""
-
-    title: str = Field(description="Creative, short title for the collection (2-5 words)")
-    genres: list[int] = Field(description="List of valid TMDB genre IDs")
-    keywords: list[str] = Field(default_factory=list, description="Specific TMDB keyword names")
-    country: str | None = Field(default=None, description="ISO 3166-1 country code or null")
 
 
 # --- ID building (format must match theme_based.py parser) ---
@@ -234,156 +224,22 @@ class RowGeneratorService:
     def __init__(self, tmdb_service: TMDBService | None = None):
         self.tmdb_service = tmdb_service or get_tmdb_service()
 
-    async def generate_rows(
-        self,
-        profile: TasteProfile,
-        content_type: str = "movie",
-        llm_config: LLMConfig | None = None,
-    ) -> list[RowDefinition]:
-        """Generate up to 3 personalized catalog rows.
-
-        Without an LLM config (user supplied no key) the rows come purely from
-        the template fallback — no LLM calls are made at all.
-        """
+    async def generate_rows(self, profile: TasteProfile, content_type: str = "movie") -> list[RowDefinition]:
+        """Up to 3 rows from the profile. A resync may replace the template title."""
         genres = profile.get_top_genres(limit=5)
         keywords = profile.get_top_keywords(limit=10)
         countries = profile.get_top_countries(limit=2)
         runtimes = sorted(profile.runtime_bucket_scores.items(), key=lambda x: x[1], reverse=True)
 
         keyword_names = await self._resolve_keyword_names([kid for kid, _ in keywords])
-
-        if llm_config:
-            try:
-                llm_rows = await self._generate_with_llm(
-                    profile, genres, keywords, keyword_names, content_type, llm_config
-                )
-                if llm_rows:
-                    logger.info(f"Generated {len(llm_rows)} LLM-driven rows for {content_type}")
-                    return llm_rows
-            except Exception as e:
-                logger.warning(f"LLM row generation failed, using fallback: {e}")
-
         rows = build_fallback_rows(genres, keywords, countries, runtimes, keyword_names, content_type)
-        titled = await self._generate_titles(rows, llm_config)
-        logger.info(f"Generated {len(titled)} rows (fallback) for {content_type}")
+        taste = taste_line(profile, content_type)
+        titled = [
+            RowDefinition(title=await name_row("theme", fallback, taste=taste), id=build_row_id(axes))
+            for axes, fallback in rows
+        ]
+        logger.info(f"Generated {len(titled)} rows for {content_type}")
         return titled
-
-    # --- Title polish via the user's LLM ---
-
-    async def _generate_titles(
-        self,
-        rows: list[tuple[list[tuple[str, str, Any]], str]],
-        llm_config: LLMConfig | None,
-    ) -> list[RowDefinition]:
-        if not rows:
-            return []
-
-        if not llm_config:
-            return [RowDefinition(title=fallback, id=build_row_id(axes)) for axes, fallback in rows]
-
-        prompts = [fallback for _, fallback in rows]
-        results = await asyncio.gather(
-            *[llm_service.generate_title(p, llm_config) for p in prompts],
-            return_exceptions=True,
-        )
-
-        final = []
-        for i, (axes, fallback) in enumerate(rows):
-            result = results[i]
-            title = result.strip() if isinstance(result, str) else ""
-            final.append(RowDefinition(title=title or fallback, id=build_row_id(axes)))
-        return final
-
-    # --- LLM-based generation ---
-
-    async def _generate_with_llm(
-        self,
-        profile: TasteProfile,
-        genres: list[tuple[int, float]],
-        keywords: list[tuple[int, float]],
-        keyword_names: dict[int, str],
-        content_type: str,
-        llm_config: LLMConfig,
-    ) -> list[RowDefinition] | None:
-        genre_map = movie_genres if content_type == "movie" else series_genres
-        valid_genres = ", ".join(f"{name} (ID: {gid})" for gid, name in genre_map.items())
-
-        # Build profile context from actual data
-        top_genre_names = [genre_map.get(gid, f"ID:{gid}") for gid, _ in genres[:5]]
-        profile_keywords = [name for kid, _ in keywords[:12] if (name := keyword_names.get(kid))]
-        top_countries = profile.get_top_countries(limit=2)
-        country_list = [c for c, _ in top_countries] if top_countries else []
-
-        profile_context = f"Top genres: {', '.join(top_genre_names)}."
-        if profile_keywords:
-            profile_context += f" Themes they enjoy: {', '.join(profile_keywords)}."
-        if country_list:
-            profile_context += f" Preferred countries: {', '.join(country_list)}."
-
-        keyword_hint = "You can suggest themes from the user's preferences or new ones for discovery."
-
-        prompt = (
-            "Based on the user's taste profile below, generate exactly 3 streaming "
-            f"collections for {content_type}. "
-            "Use genres (required), keywords, and country when relevant.\n\n"
-            f"User Profile:\n{profile_context}\n\n"
-            "Generate 3 rows:\n"
-            "1. THE CORE — strongest match to their taste\n"
-            "2. MIXED PREFERENCES — blend with variety\n"
-            "3. RISING STAR — discovery, adjacent to their taste\n\n"
-            f"Genres: use ONLY these TMDB Genre IDs: {valid_genres}\n"
-            f"Keywords: {keyword_hint}\n"
-            "Country: ISO 3166-1 code or null.\n"
-            "Each row: title (2-5 words), genres (list of IDs), "
-            "keywords (list of strings), country (string or null).\n"
-            "Output a JSON array of 3 objects."
-        )
-
-        data = await llm_service.generate_structured(
-            prompt=prompt,
-            output_type=list[LLMRowTheme],
-            system_instruction=(
-                "You are a creative film curator. Design 3 catalog rows from the user's interest summary. "
-                "Row 1: strong match. Row 2: blend + variety. Row 3: discovery. "
-                "Use genres, keywords, and country."
-            ),
-            config=llm_config,
-        )
-
-        if not data or not isinstance(data, list):
-            return None
-
-        profile_kw_map = {name.lower(): kid for kid, name in keyword_names.items()}
-        final = []
-
-        for item in data:
-            if isinstance(item, dict):
-                title, genre_ids, kw_names, country = (
-                    item.get("title", "Recommended"),
-                    item.get("genres", []),
-                    item.get("keywords", []),
-                    item.get("country"),
-                )
-            else:
-                title, genre_ids, kw_names, country = item.title, item.genres, item.keywords, item.country
-
-            axes: list[tuple[str, str, Any]] = []
-            for gid in genre_ids:
-                if int(gid) in genre_map:
-                    axes.append((ROLE_ANCHOR, AXIS_GENRE, int(gid)))
-
-            for kw_name in kw_names:
-                kid = await self._resolve_keyword_to_id(kw_name, profile_kw_map)
-                if kid is not None:
-                    axes.append((ROLE_FLAVOR, AXIS_KEYWORD, kid))
-
-            if country:
-                axes.append((ROLE_FLAVOR, AXIS_COUNTRY, country))
-
-            if axes:
-                final.append(RowDefinition(title=title, id=build_row_id(axes)))
-
-        return final if final else None
 
     # --- Helpers ---
 
@@ -400,21 +256,3 @@ class RowGeneratorService:
             return data.get("name")
         except Exception:
             return None
-
-    async def _resolve_keyword_to_id(self, kw_name: str, profile_kw_map: dict[str, int]) -> int | None:
-        kw_lower = str(kw_name).strip().lower()
-        if not kw_lower:
-            return None
-        if kw_lower in profile_kw_map:
-            return profile_kw_map[kw_lower]
-        try:
-            data = await self.tmdb_service.search_keywords(kw_lower)
-            results = data.get("results") or []
-            if results:
-                first = results[0]
-                kid = first.get("id") if isinstance(first, dict) else getattr(first, "id", None)
-                if kid is not None:
-                    return int(kid)
-        except Exception:
-            pass
-        return None
