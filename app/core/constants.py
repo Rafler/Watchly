@@ -30,6 +30,8 @@ CATALOG_KEY: str = "watchly:catalog:{token}:{type}:{id}"
 # Versioned because the manifest embeds the addon version: a deploy orphans the old
 # entries rather than serving a stale version string until the TTL runs out.
 MANIFEST_KEY: str = "watchly:manifest:{version}:{token}"
+ACCOUNT_INDEX_KEY: str = "watchly:accounts"
+RESYNC_LOCK_KEY: str = "watchly:resync:lock"
 
 # The manifest is rebuilt on save and by the catalog updater, so this is only a
 # backstop against an invalidation being missed.

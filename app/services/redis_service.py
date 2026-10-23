@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Any
 
 import redis.asyncio as redis
@@ -161,6 +163,32 @@ class RedisService:
         except (redis.RedisError, OSError) as exc:
             logger.error(f"Failed to set_nx key '{key}' in Redis: {exc}")
             return False
+
+    async def sadd(self, key: str, member: str) -> bool:
+        try:
+            client = await self.get_client()
+            await client.sadd(key, member)
+            return True
+        except (redis.RedisError, OSError) as exc:
+            logger.error(f"Failed to add member to '{key}' in Redis: {exc}")
+            return False
+
+    async def srem(self, key: str, member: str) -> bool:
+        try:
+            client = await self.get_client()
+            await client.srem(key, member)
+            return True
+        except (redis.RedisError, OSError) as exc:
+            logger.error(f"Failed to remove member from '{key}' in Redis: {exc}")
+            return False
+
+    async def smembers(self, key: str) -> set[str]:
+        try:
+            client = await self.get_client()
+            return set(await client.smembers(key))
+        except (redis.RedisError, OSError) as exc:
+            logger.error(f"Failed to read set '{key}' from Redis: {exc}")
+            return set()
 
     async def close(self) -> None:
         """Close and disconnect the Redis client"""

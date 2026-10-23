@@ -1,6 +1,4 @@
-import asyncio
 import re
-import time
 from typing import Any
 
 from fastapi import HTTPException
@@ -12,9 +10,9 @@ from app.core.security import redact_token
 from app.core.settings import UserSettings, resolve_tmdb_api_key
 from app.models.library import LibraryCollection
 from app.models.profile import TasteProfile
-from app.services.catalog_updater import catalog_updater
 from app.services.context import UserContext, extract_settings, load_user_context
 from app.services.profile.service import ProfileService
+from app.services.ranking import rerank_catalog
 from app.services.recommendation.all_based import AllBasedService
 from app.services.recommendation.catalog_utils import clean_meta, shuffle_data_if_needed
 from app.services.recommendation.creators import CreatorsService
@@ -22,23 +20,12 @@ from app.services.recommendation.item_based import ItemBasedService
 from app.services.recommendation.rewatch import RewatchService
 from app.services.recommendation.theme_based import ThemeBasedService
 from app.services.recommendation.top_picks import TopPicksService
-from app.services.redis_service import redis_service
 from app.services.tmdb.service import get_tmdb_service
 from app.services.token_store import token_store
 from app.services.user_cache import user_cache
-from app.services.warmup import warmup_service
-
-REFRESH_LOCK_PREFIX = "watchly:refreshlock:"
-# Long enough to cover a slow rebuild, short enough that a worker killed mid-refresh
-# doesn't keep a row stale for long.
-REFRESH_LOCK_TTL_SECONDS = 600
 
 
 class CatalogService:
-    def __init__(self) -> None:
-        # Retained so a background refresh isn't garbage collected mid-flight.
-        self._refresh_tasks: set[asyncio.Task] = set()
-
     async def get_catalog(
         self, token: str, content_type: str, catalog_id: str
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -62,37 +49,15 @@ class CatalogService:
                 detail="Invalid or expired token. Please reconfigure the addon.",
             )
 
-        # Trigger lazy update if needed. Skipped while a warm-up is running: on a
-        # re-configure last_updated carries over from the old record, so this would
-        # otherwise fire a full manifest rebuild and Stremio push alongside the warm
-        # that is already doing exactly that.
-        if settings.AUTO_UPDATE_CATALOGS and not await warmup_service.is_warming(token):
-            try:
-                await catalog_updater.trigger_update(token, credentials)
-            except Exception as e:
-                logger.error(f"[{redact_token(token)}] Failed to trigger auto update: {e}")
-
-        # Check cache first — avoids auth/library/profile loading on cache hit
+        # The daily resync rebuilds rows. Doing it from this request is what dies on
+        # serverless, and a model call here would block Stremio on OpenRouter.
         cached_result = await user_cache.get_catalog(token, content_type, catalog_id)
 
         if cached_result:
-            data, created_at = cached_result
-            age = int(time.time()) - created_at
+            data, _created_at = cached_result
             user_settings = extract_settings(credentials)
             data["metas"] = shuffle_data_if_needed(user_settings, catalog_id, data["metas"])
-
-            if age < settings.CATALOG_REFRESH_INTERVAL_SECONDS:
-                logger.debug(f"[{redact_token(token)}] Using cached catalog for {content_type}/{catalog_id}")
-                return data, headers
-
-            # Stale but serveable: hand it back now and rebuild behind the response.
-            # Rebuilding inline meant every row on a home screen stalled for a full
-            # rebuild once the cache aged out, which is most of the wait users saw.
-            logger.info(
-                f"[{redact_token(token)}] Catalog stale (age: {age}s) for {content_type}/{catalog_id}, "
-                "serving stale and refreshing in the background"
-            )
-            self._enqueue_refresh(token, content_type, catalog_id)
+            logger.debug(f"[{redact_token(token)}] Using cached catalog for {content_type}/{catalog_id}")
             return data, headers
 
         logger.info(
@@ -122,44 +87,6 @@ class CatalogService:
             "Content-Type": "application/json",
             "Cache-Control": f"private, max-age={max_age},stale-while-revalidate=3600, stale-if-error=1800",
         }
-
-    def _enqueue_refresh(self, token: str, content_type: str, catalog_id: str) -> None:
-        task = asyncio.create_task(self._refresh_in_background(token, content_type, catalog_id))
-        self._refresh_tasks.add(task)
-        task.add_done_callback(self._refresh_tasks.discard)
-
-    async def _refresh_in_background(self, token: str, content_type: str, catalog_id: str) -> None:
-        """Rebuild a stale catalog into the cache.
-
-        Locked in Redis rather than in-process because Stremio asks for every
-        enabled row at once: without it, one home screen open would kick off a full
-        rebuild per row.
-        """
-        lock_key = f"{REFRESH_LOCK_PREFIX}{token}:{content_type}:{catalog_id}"
-        if not await redis_service.set_nx(lock_key, "1", REFRESH_LOCK_TTL_SECONDS):
-            logger.debug(f"[{redact_token(token)}] Refresh already running for {content_type}/{catalog_id}")
-            return
-
-        try:
-            # A scheduled refresh running for this user may replace the library and
-            # profiles and drop this row. Rebuilding alongside it would use the old ones
-            # and could land afterwards as fresh, so wait, then rebuild only if the row
-            # is still stale.
-            await catalog_updater.wait_for(token)
-            cached = await user_cache.get_catalog(token, content_type, catalog_id)
-            if cached and int(time.time()) - cached[1] < settings.CATALOG_REFRESH_INTERVAL_SECONDS:
-                return
-            ctx = await load_user_context(token)
-            try:
-                # Called for the cache write it performs; the response is discarded.
-                await self._build_catalog(ctx, content_type, catalog_id, self._headers())
-            finally:
-                await ctx.close()
-            logger.info(f"[{redact_token(token)}] Background refresh done for {content_type}/{catalog_id}")
-        except Exception as e:
-            logger.warning(f"[{redact_token(token)}] Background refresh failed for {content_type}/{catalog_id}: {e}")
-        finally:
-            await redis_service.delete(lock_key)
 
     async def _build_catalog(
         self,
@@ -444,7 +371,7 @@ class CatalogService:
             logger.warning(f"Unknown catalog ID: {catalog_id}")
             recommendations = []
 
-        return recommendations
+        return await rerank_catalog(recommendations, catalog_id, profile, content_type)
 
 
 catalog_service = CatalogService()

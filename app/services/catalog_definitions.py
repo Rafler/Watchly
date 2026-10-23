@@ -6,9 +6,10 @@ from typing import Any, cast
 from loguru import logger
 
 from app.core.constants import DISCOVER_ONLY_EXTRA
-from app.core.settings import CatalogConfig, LLMConfig, UserSettings, resolve_llm_config
+from app.core.settings import CatalogConfig, UserSettings
 from app.models.library import LibraryCollection
 from app.services.profile.service import ProfileService
+from app.services.ranking import is_default_top_name, name_row, ranking_active, taste_line
 from app.services.row_generator import RowGeneratorService
 from app.services.tmdb.service import get_tmdb_service
 from app.services.user_cache import user_cache
@@ -210,6 +211,13 @@ class DynamicCatalogService:
             for content_type in ("movie", "series"):
                 await user_cache.set_row_map(token, content_type, row_slots.get(content_type, {}))
 
+        if ranking_active():
+            for catalog in catalogs:
+                if catalog.get("id") == "watchly.rec" and is_default_top_name(catalog.get("name")):
+                    media = catalog.get("type") or "movie"
+                    profile = await user_cache.get_profile(token, media) if token else None
+                    catalog["name"] = await name_row("top", catalog["name"], taste=taste_line(profile, media))
+
         return catalogs
 
     # --- Theme catalog building (was ThemeCatalogService) ---
@@ -224,13 +232,11 @@ class DynamicCatalogService:
         token: str | None,
         row_slots: dict[str, dict[str, str]],
     ) -> list[dict[str, Any]]:
-        llm_config = resolve_llm_config(user_settings)
-
         tasks = []
         if enabled_movie:
-            tasks.append(self._build_theme_rows_for_type(library_items, "movie", llm_config, token, user_settings))
+            tasks.append(self._build_theme_rows_for_type(library_items, "movie", token, user_settings))
         if enabled_series:
-            tasks.append(self._build_theme_rows_for_type(library_items, "series", llm_config, token, user_settings))
+            tasks.append(self._build_theme_rows_for_type(library_items, "series", token, user_settings))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         catalogs: list[dict[str, Any]] = []
@@ -261,7 +267,6 @@ class DynamicCatalogService:
         self,
         library_items: LibraryCollection,
         media_type: str,
-        llm_config: LLMConfig | None,
         token: str | None,
         user_settings: UserSettings | None = None,
     ) -> tuple[str, list[Any]]:
@@ -286,7 +291,7 @@ class DynamicCatalogService:
             logger.warning(f"Failed to build profile for {media_type}")
             return media_type, []
 
-        rows = await self.row_generator.generate_rows(profile, media_type, llm_config=llm_config)
+        rows = await self.row_generator.generate_rows(profile, media_type)
         return media_type, rows
 
     # --- Item-based rows ---
@@ -396,6 +401,9 @@ class DynamicCatalogService:
         for slot, (seed, seed_is_loved) in enumerate(seeds, start=1):
             label = "Because you loved" if seed_is_loved else "Because you watched"
             entry = self.build_catalog_entry(seed, label, "watchly.item", display_at_home)
+            entry["name"] = await name_row(
+                "because", entry["name"], seed_title=entry.get("_catalog_name_suffix") or None
+            )
             # The seed is re-randomised on every rebuild, so keeping it in the id gave
             # this row a new cache key each time. It lives in the slot map instead.
             row_slots.setdefault(content_type, {})[f"item.{slot}"] = entry["id"].replace("watchly.item.", "", 1)

@@ -268,40 +268,13 @@
                 </div>
             </div>
 
-            <!-- AI features -->
             <div class="card">
-                <div class="flex items-center gap-2">
-                    <h3 class="card-title">AI features</h3>
-                    <span class="badge border border-white/10 bg-white/[0.04] text-neutral-300">Optional</span>
-                </div>
-                <p id="llmHelpText" class="card-desc">Bring your own LLM key for interest profiles and smarter themed
-                    rows. Without one, rows use standard titles.</p>
-                <div class="mt-5 space-y-3">
-                    <div>
-                        <label for="llmProvider" class="field-label">Provider</label>
-                        <div class="relative">
-                            <select id="llmProvider" class="input cursor-pointer appearance-none pr-10">
-                                <option value="">None</option>
-                                <option value="gemini">Google Gemini</option>
-                                <option value="openai">OpenAI</option>
-                                <option value="anthropic">Anthropic</option>
-                                <option value="openrouter">OpenRouter</option>
-                            </select>
-                            {{ select_chevron() }}
-                        </div>
-                    </div>
-
-                    <div id="llmApiKeyContainer" style="display: none;">
-                        {{ secret_input('llmApiKey', 'Paste your API key', 'Validate key - Click to verify your API key works') }}
-                    </div>
-
-                    <div id="llmModelContainer" style="display: none;">
-                        <input type="text" id="llmModel" spellcheck="false" class="input font-mono placeholder:font-sans"
-                            placeholder="Model (optional)">
-                    </div>
-
-                    <div id="llmValidationMessage" class="mt-2 text-xs hidden"></div>
-                </div>
+                <h3 class="card-title">Recommendation rows</h3>
+                <p class="card-desc">Top Picks, Because you watched, and theme rows are ordered and named by the
+                    server's OpenRouter model during the daily resync. This page does not take an API key. Without
+                    <span class="font-mono text-[13px]">OPENROUTER_API_KEY</span> and
+                    <span class="font-mono text-[13px]">OPENROUTER_MODEL</span> on the server, rows keep Watchly's
+                    built-in scores and titles.</p>
             </div>
         </div>
     </div>

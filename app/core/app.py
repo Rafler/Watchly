@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,6 +18,7 @@ from app.core.logging import configure_logging, register_request_id_middleware
 from app.core.security import STORED_SECRET_SENTINEL
 from app.core.settings import MAX_ITEM_ROWS, get_current_year, get_default_catalogs_for_frontend, get_default_year_range
 from app.services.redis_service import redis_service
+from app.services.resync import resync_loop, scheduler_enabled
 from app.services.tmdb.genre import movie_genres, series_genres
 from app.services.token_store import token_store
 
@@ -42,7 +44,18 @@ async def lifespan(app: FastAPI):
             "Set the TOKEN_SALT environment variable to a strong, unique value before starting the app."
         )
 
+    task = None
+    if scheduler_enabled():
+        task = asyncio.create_task(resync_loop())
+        logger.info(f"Catalog resync scheduler started, interval={settings.CATALOG_REFRESH_INTERVAL_SECONDS}s")
+
     yield
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     try:
         await redis_service.close()
         logger.info("Redis client closed")

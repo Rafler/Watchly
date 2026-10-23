@@ -1,6 +1,5 @@
 import time
 from datetime import datetime, timezone
-from typing import TypeVar
 
 from fastapi import HTTPException
 from loguru import logger
@@ -8,21 +7,13 @@ from loguru import logger
 from app.api.models.tokens import TokenRequest, TokenResponse, TraktTokens
 from app.core.config import settings
 from app.core.security import STORED_SECRET_SENTINEL, mask_stored_secrets, redact_token, secret_hints
-from app.core.settings import (
-    LLMConfig,
-    PosterRatingConfig,
-    UserSettings,
-    get_default_settings,
-    settings_from_credentials,
-)
+from app.core.settings import PosterRatingConfig, UserSettings, get_default_settings, settings_from_credentials
 from app.services.mdblist import mdblist_service
 from app.services.nuvio import nuvio_service
 from app.services.simkl import simkl_service
 from app.services.stremio.service import StremioBundle
 from app.services.token_store import token_store
 from app.services.trakt import trakt_service
-
-KeyedConfigT = TypeVar("KeyedConfigT", LLMConfig, PosterRatingConfig)
 
 
 class AuthService:
@@ -339,8 +330,7 @@ class AuthService:
             master_token = await self._find_account_token("stremio", identities["stremio"].split(":", 1)[0])
             master_settings = ((await token_store.get_user_data(master_token)) or {}).get("settings") or {}
             stored_settings = {
-                field: master_settings.get(field)
-                for field in ("tmdb_api_key", "llm", "gemini_api_key", "simkl_api_key", "poster_rating")
+                field: master_settings.get(field) for field in ("tmdb_api_key", "simkl_api_key", "poster_rating")
             }
 
         user_settings = self._build_user_settings(payload, stored_settings)
@@ -432,8 +422,6 @@ class AuthService:
             popularity=payload.popularity,
             sorting_order=payload.sorting_order,
             simkl_api_key=unmasked("simkl_api_key", payload.simkl_api_key),
-            llm=self._unmask_nested_key(payload.llm, self._stored_llm(stored)),
-            gemini_api_key=unmasked("gemini_api_key", payload.gemini_api_key),
             tmdb_api_key=unmasked("tmdb_api_key", payload.tmdb_api_key),
             trakt_access_token=unmasked("trakt_access_token", payload.trakt_access_token),
             trakt_refresh_token=unmasked("trakt_refresh_token", payload.trakt_refresh_token),
@@ -449,25 +437,11 @@ class AuthService:
         )
 
     @staticmethod
-    def _stored_llm(stored: dict) -> dict | None:
-        """The stored LLM config, including a legacy gemini_api_key seen as one.
-
-        The configure page loads a legacy key into the LLM fields, so it submits
-        a masked gemini config that has to resolve against that older field.
-        """
-        if stored.get("llm"):
-            return stored["llm"]
-        if stored.get("gemini_api_key"):
-            return {"provider": "gemini", "api_key": stored["gemini_api_key"]}
-        return None
-
-    @staticmethod
-    def _unmask_nested_key(config: KeyedConfigT | None, stored: dict | None) -> KeyedConfigT | None:
-        """Restore the stored api_key on an LLM/poster-rating config submitted with a sentinel.
+    def _unmask_nested_key(config: PosterRatingConfig | None, stored: dict | None) -> PosterRatingConfig | None:
+        """Restore the stored api_key when the configure page submits the sentinel.
 
         The stored key only carries over while the provider is unchanged; picking
-        a different provider without supplying its key turns the feature off,
-        since both models reject a provider with no usable key.
+        a different provider without supplying its key turns the feature off.
         """
         if config is None or config.api_key != STORED_SECRET_SENTINEL:
             return config
